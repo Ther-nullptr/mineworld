@@ -166,7 +166,7 @@ Thank you to everyone who contributed their wisdom and efforts to this project.
 
 ## ☎️ Contact
 
-We welcome feedback and collaboration from our audience. If you have suggestions, questions, or observe unexpected/offensive behavior in our technology, please contact us through `junliangguo AT microsoft.com`.
+We welcome feedback and collaboration from our audience. If you have suggestions, questions, or observe unexpected/offensive behavior in our technology, please contact us through `tianyuhe AT microsoft.com`.
 
 ## 📄 Contributing
 
