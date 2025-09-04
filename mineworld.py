@@ -172,6 +172,10 @@ def get_args():
     parser.add_argument('--reference_frame', type=int,  default=8)
     parser.add_argument('--diagd', action='store_true', help='use diagd')
     parser.add_argument('--window_size', type=int,  default=4)
+    parser.add_argument('--cache-strategy', type=str, default='none', help="Cache strategy: none, streaming, h2o")
+    parser.add_argument('--hh-ratio', type=float, default=0.1, help="H2O heavy hitter ratio")
+    parser.add_argument('--start-size', type=int, default=4, help="Streaming-LLM start tokens size")
+    parser.add_argument('--recent-size', type=int, default=512, help="Streaming-LLM recent tokens size")
     args = parser.parse_args()
     return args
 
@@ -401,6 +405,23 @@ if __name__ == "__main__":
     assert CONTEXT_LEN > REFERENCE_FRAME
     model = load_model(config, args.model_ckpt, gpu=True, eval_mode=True)
     tokenizer = model.tokenizer
+    
+    # Setup cache manager if specified
+    if args.cache_strategy != 'none':
+        cache_kwargs = {}
+        if args.cache_strategy == 'h2o':
+            cache_kwargs = {
+                'hh_ratio': args.hh_ratio,
+                'prompt_len': REFERENCE_FRAME  # Use reference frame as prompt length
+            }
+        elif args.cache_strategy == 'streaming':
+            cache_kwargs = {
+                'start_size': args.start_size,
+                'recent_size': args.recent_size
+            }
+        
+        model.transformer.setup_cache_manager(args.cache_strategy, **cache_kwargs)
+        print(f"Enabled {args.cache_strategy} cache strategy")
     with gr.Blocks(css=css) as demo:
         with gr.Tab("MineWorld", elem_classes="custom-tab"):
             source_video_path = gr.Text(value=args.scene, visible=False)

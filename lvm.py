@@ -15,6 +15,7 @@ from transformers.utils import logging
 from transformers import LlamaConfig
 from utils import get_obj_from_str, instantiate_from_config
 from diagonal_decoding import decode_one_token, decode_some_token, decode_n_tokens, decode_n_tokens_for_gradio, prefill, img_diagd_decode_n_tokens, video_diagd_decode_n_tokens, img_diagd_decode_n_token_for_gradio
+from kv_cache_manager import KVCacheManager
 torch.backends.cuda.matmul.allow_tf32 = False
 
 logger = logging.get_logger(__name__)
@@ -184,11 +185,17 @@ class LlamaAttention(nn.Module):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.max_batch_size = getattr(config, "max_batch_size", 1)
         self.init_kv_cache()
+        self.cache_manager = None
+        self.current_position = 0
 
     def init_kv_cache(self, dtype=torch.float16):
         cache_shape = (self.max_batch_size, self.max_position_embeddings, self.num_key_value_heads, self.head_dim)
         self.cache_k = torch.zeros(cache_shape, dtype=dtype).cuda()
         self.cache_v = torch.zeros(cache_shape, dtype=dtype).cuda()
+    
+    def set_cache_manager(self, cache_manager: KVCacheManager):
+        """Set the cache manager for advanced cache management"""
+        self.cache_manager = cache_manager
 
     def forward(
             self,
@@ -220,9 +227,39 @@ class LlamaAttention(nn.Module):
             query_states, key_states, cos, sin, position_ids
         )
         
+        # Update cache
         self.cache_k[:bsz, position_ids] = key_states
         self.cache_v[:bsz, position_ids] = value_states
-        key_states, value_states = (
+        
+        # Apply cache management if enabled
+        if self.cache_manager is not None:
+            # Get attention weights for H2O if needed
+            attention_weights = None
+            if self.cache_manager.strategy == "h2o":
+                # Calculate attention weights
+                key_states_temp = key_states.repeat_interleave(self.num_key_value_groups, dim=2)
+                value_states_temp = value_states.repeat_interleave(self.num_key_value_groups, dim=2)
+                query_states_temp, key_states_temp, value_states_temp = map(lambda x: x.transpose(1, 2), (query_states, key_states_temp, value_states_temp))
+                
+                # Calculate attention scores
+                attn_scores = torch.matmul(query_states_temp, key_states_temp.transpose(-2, -1))
+                attn_scores = attn_scores / (self.head_dim ** 0.5)
+                attention_weights = F.softmax(attn_scores, dim=-1)
+            
+            # Apply cache management
+            key_states_managed, value_states_managed = self.cache_manager.apply_cache_management(
+                (self.cache_k[:bsz, :, :], self.cache_v[:bsz, :, :]), 
+                attention_weights
+            )
+            
+            # Update cache with managed values
+            self.cache_k[:bsz, :, :key_states_managed.shape[1]] = key_states_managed
+            self.cache_v[:bsz, :, :value_states_managed.shape[1]] = value_states_managed
+            
+            key_states = key_states_managed
+            value_states = value_states_managed
+        else:
+            key_states, value_states = (
                 self.cache_k[:bsz, :, :],
                 self.cache_v[:bsz, :, :],
             )
@@ -370,6 +407,7 @@ class LlamaForCausalLM(PreTrainedModel):
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.cache_manager = None
         self.post_init()      
 
     def forward(
@@ -387,6 +425,24 @@ class LlamaForCausalLM(PreTrainedModel):
     def refresh_kvcache(self):
         for i in self.model.layers:
             i.self_attn.init_kv_cache()
+    
+    def setup_cache_manager(self, strategy: str = "none", **kwargs):
+        """Setup cache manager with specified strategy"""
+        if strategy != "none":
+            self.cache_manager = KVCacheManager(strategy=strategy, **kwargs)
+            # Initialize cache manager for all attention layers
+            for layer in self.model.layers:
+                layer.self_attn.set_cache_manager(self.cache_manager)
+            
+            # Initialize cache sizes for H2O
+            if strategy == "h2o" and hasattr(self.cache_manager, 'initialize_for_prompt'):
+                self.cache_manager.initialize_for_prompt(kwargs.get('prompt_len', 1000))
+    
+    def disable_cache_manager(self):
+        """Disable cache manager and use standard caching"""
+        self.cache_manager = None
+        for layer in self.model.layers:
+            layer.self_attn.cache_manager = None
 
     def naive_generate(self, input_ids, max_new_tokens, temperature=1.0, action_all=None, top_p=None, top_k=None):
 

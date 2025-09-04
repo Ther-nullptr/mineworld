@@ -20,6 +20,10 @@ ACCELERATE_ALGO = [
     'naive','image_diagd'
 ]
 
+CACHE_STRATEGIES = [
+    'none', 'streaming', 'h2o'
+]
+
 TARGET_SIZE=(224,384)
 TOKEN_PER_IMAGE = 347 # IMAGE = PIX+ACTION
 TOKEN_PER_PIX = 336
@@ -57,6 +61,10 @@ def get_args():
     parser.add_argument('--frames', type=int, required=True)
     parser.add_argument('--window_size', type=int, default=2)
     parser.add_argument('--accelerate-algo', type=str, default='naive', help=f"Accelerate Algorithm Option: {ACCELERATE_ALGO}")
+    parser.add_argument('--cache-strategy', type=str, default='none', help=f"Cache Strategy Option: {CACHE_STRATEGIES}")
+    parser.add_argument('--hh-ratio', type=float, default=0.1, help="H2O heavy hitter ratio (0.0-1.0)")
+    parser.add_argument('--start-size', type=int, default=4, help="Streaming-LLM start tokens size")
+    parser.add_argument('--recent-size', type=int, default=512, help="Streaming-LLM recent tokens size")
     parser.add_argument('--fps', type=int, default=6)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--top_k', type=int, help='Use top-k sampling')
@@ -82,6 +90,24 @@ def lvm_generate(args, model, output_dir, demo_video):
         return {}
     
     device = model.transformer.device
+    
+    # Setup cache manager based on strategy
+    if args.cache_strategy != 'none':
+        cache_kwargs = {}
+        if args.cache_strategy == 'h2o':
+            cache_kwargs = {
+                'hh_ratio': args.hh_ratio,
+                'prompt_len': args.demo_num  # Use demo_num as approximate prompt length
+            }
+        elif args.cache_strategy == 'streaming':
+            cache_kwargs = {
+                'start_size': args.start_size,
+                'recent_size': args.recent_size
+            }
+        
+        model.transformer.setup_cache_manager(args.cache_strategy, **cache_kwargs)
+        print(f"[bold magenta][MINEWORLD][CACHE][/bold magenta] Enabled {args.cache_strategy} cache strategy")
+    
     ### 2. load action into list 
     action_list = []
     mcdataset = MCDataset()
@@ -154,11 +180,17 @@ if __name__ == '__main__':
 
     model = load_model(config, args.model_ckpt, gpu=True, eval_mode=True)
     print(f"[bold magenta][MINEWORLD][INFERENCE][/bold magenta] Load Model From {args.model_ckpt}")
-    # get accelearte algoritm
+    # get accelerate algorithm
     args.accelerate_algo = args.accelerate_algo.lower()
     if args.accelerate_algo not in ACCELERATE_ALGO:
         print(f"[bold red][Warning][/bold red] {args.accelerate_algo} is not in {ACCELERATE_ALGO}, use naive")
         args.accelerate_algo = 'naive'
+    
+    # get cache strategy
+    args.cache_strategy = args.cache_strategy.lower()
+    if args.cache_strategy not in CACHE_STRATEGIES:
+        print(f"[bold red][Warning][/bold red] {args.cache_strategy} is not in {CACHE_STRATEGIES}, use none")
+        args.cache_strategy = 'none'
     num_item = 0
     for root, _, files in os.walk(args.data_root):
         files = [f for f in files  if f.endswith('.mp4')] # mp4 would not influence progress bar 
