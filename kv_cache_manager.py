@@ -130,7 +130,10 @@ class AdaptiveKVCache:
         self.kwargs = kwargs
         
         if strategy == "h2o":
-            self.cache = H2OKVCache(**kwargs)
+            # H2OKVCache only needs specific parameters
+            h2o_kwargs = {k: v for k, v in kwargs.items() 
+                         if k in ['hh_ratio', 'k_seq_dim', 'v_seq_dim', 'device']}
+            self.cache = H2OKVCache(**h2o_kwargs)
         elif strategy == "streaming":
             self.cache = StreamingKVCache(**kwargs)
         else:
@@ -180,5 +183,5 @@ class KVCacheManager:
     
     def initialize_for_prompt(self, prompt_len: int):
         """Initialize cache sizes based on prompt length"""
-        if self.cache is not None and hasattr(self.cache.cache, 'initialize_cache_sizes'):
-            self.cache.cache.initialize_cache_sizes(prompt_len)
+        if self.cache is not None and hasattr(self.cache, 'initialize_cache_sizes'):
+            self.cache.initialize_cache_sizes(prompt_len)
