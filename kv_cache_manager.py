@@ -60,57 +60,51 @@ class H2OKVCache:
         # Combine heavy hitters with recent tokens
         return torch.cat([hh_k, recent_k], dim=1)
     
-    def __call__(self, past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]]) -> Optional[List[Tuple[torch.Tensor, torch.Tensor]]]:
+    def __call__(self, past_key_values: Optional[Tuple[torch.Tensor, torch.Tensor]]) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         """Apply H2O cache management"""
         if past_key_values is None:
             return None
             
-        new_past_key_values = []
-        for layer_idx, (k, v) in enumerate(past_key_values):
-            seq_len = k.size(self.k_seq_dim)
-            
-            if seq_len <= self.total_cache_size:
-                new_past_key_values.append((k, v))
-            else:
-                # Apply H2O strategy
-                k_h2o = self.get_heavy_hitters(k, seq_len)
-                v_h2o = self.get_heavy_hitters(v, seq_len)
-                new_past_key_values.append((k_h2o, v_h2o))
-                
-        return new_past_key_values
+        k, v = past_key_values
+        seq_len = k.size(self.k_seq_dim)
+        
+        if seq_len <= self.total_cache_size:
+            return (k, v)
+        else:
+            # Apply H2O strategy
+            k_h2o = self.get_heavy_hitters(k, seq_len)
+            v_h2o = self.get_heavy_hitters(v, seq_len)
+            return (k_h2o, v_h2o)
     
-    def evict_for_space(self, past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]], num_coming: int) -> Optional[List[Tuple[torch.Tensor, torch.Tensor]]]:
+    def evict_for_space(self, past_key_values: Optional[Tuple[torch.Tensor, torch.Tensor]], num_coming: int) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         """Evict tokens to make space for new tokens"""
         if past_key_values is None:
             return None
             
-        new_past_key_values = []
-        for k, v in past_key_values:
-            seq_len = k.size(self.k_seq_dim)
+        k, v = past_key_values
+        seq_len = k.size(self.k_seq_dim)
+        
+        if seq_len + num_coming <= self.total_cache_size:
+            return (k, v)
+        else:
+            # Need to evict: keep heavy hitters and most recent tokens
+            available_space = self.total_cache_size - num_coming
+            keep_recent = min(self.recent_size, available_space)
+            keep_hh = max(0, available_space - keep_recent)
             
-            if seq_len + num_coming <= self.total_cache_size:
-                new_past_key_values.append((k, v))
+            if keep_hh > 0:
+                hh_k = self.get_heavy_hitters(k[:, :-self.recent_size], seq_len - self.recent_size)[:, :keep_hh]
+                recent_k = k[:, -keep_recent:]
+                k_evicted = torch.cat([hh_k, recent_k], dim=1)
+                
+                hh_v = self.get_heavy_hitters(v[:, :-self.recent_size], seq_len - self.recent_size)[:, :keep_hh]
+                recent_v = v[:, -keep_recent:]
+                v_evicted = torch.cat([hh_v, recent_v], dim=1)
             else:
-                # Need to evict: keep heavy hitters and most recent tokens
-                available_space = self.total_cache_size - num_coming
-                keep_recent = min(self.recent_size, available_space)
-                keep_hh = max(0, available_space - keep_recent)
+                k_evicted = k[:, -keep_recent:]
+                v_evicted = v[:, -keep_recent:]
                 
-                if keep_hh > 0:
-                    hh_k = self.get_heavy_hitters(k[:, :-self.recent_size], seq_len - self.recent_size)[:, :keep_hh]
-                    recent_k = k[:, -keep_recent:]
-                    k_evicted = torch.cat([hh_k, recent_k], dim=1)
-                    
-                    hh_v = self.get_heavy_hitters(v[:, :-self.recent_size], seq_len - self.recent_size)[:, :keep_hh]
-                    recent_v = v[:, -keep_recent:]
-                    v_evicted = torch.cat([hh_v, recent_v], dim=1)
-                else:
-                    k_evicted = k[:, -keep_recent:]
-                    v_evicted = v[:, -keep_recent:]
-                    
-                new_past_key_values.append((k_evicted, v_evicted))
-                
-        return new_past_key_values
+            return (k_evicted, v_evicted)
 
 
 class StreamingKVCache(StartRecentKVCache):
